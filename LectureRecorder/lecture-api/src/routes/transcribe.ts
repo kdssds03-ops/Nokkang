@@ -333,7 +333,12 @@ router.post('/quick', uploadSingle('audio'), async (req: Request, res: Response)
         }
         if (pollRes.data.status === 'error') {
           console.error(`[transcribe/quick] AssemblyAI error on poll #${i + 1}: ${pollRes.data.error}`);
-          res.json({ text: '' });
+          const reason = String(pollRes.data.error ?? '').toLowerCase();
+          if (reason.includes('no spoken audio') || reason.includes('language_detection cannot be performed')) {
+            res.json({ text: '' });
+          } else {
+            res.status(502).json({ error: '음성 인식 서비스에서 처리하지 못했습니다.' });
+          }
           return;
         }
       } catch (pollErr: any) {
@@ -346,16 +351,15 @@ router.post('/quick', uploadSingle('audio'), async (req: Request, res: Response)
       }
     }
 
-    console.warn(`[transcribe/quick] polling timed out after ${QUICK_POLL_MAX}s (${elapsed()}) — returning empty text`);
-    res.json({ text: '' });
+    console.warn(`[transcribe/quick] polling timed out after ${QUICK_POLL_MAX}s (${elapsed()})`);
+    res.status(504).json({ error: '음성 인식 응답 시간이 초과되었습니다.' });
   } catch (err: any) {
     const status = err.response?.status;
     const detail = err.response?.data ?? err.message;
     const detailStr = typeof detail === 'object' ? JSON.stringify(detail) : String(detail);
     console.error(`[transcribe/quick] unhandled error — elapsed=${elapsed()}, HTTP ${status ?? 'n/a'}: ${detailStr}`);
     cleanupTempFile(tmpPath);
-    // Return empty text with 200 so real-time flow degrades gracefully
-    res.status(200).json({ text: '' });
+    res.status(502).json({ error: '음성 인식 서비스에 연결하지 못했습니다.' });
   }
 });
 

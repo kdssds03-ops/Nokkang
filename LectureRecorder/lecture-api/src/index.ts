@@ -2,6 +2,7 @@ import express from 'express';
 import { config } from './config';
 import transcribeRouter from './routes/transcribe';
 import summarizeRouter from './routes/summarize';
+import studyRouter from './routes/study';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,7 +15,7 @@ function validateEnv(): void {
   const checks = [
     { key: 'ASSEMBLYAI_API_KEY', value: config.assemblyAiKey, desc: 'transcription (AssemblyAI)' },
     { key: 'OPENAI_API_KEY',     value: config.openAiKey,     desc: 'summarization / translation / title' },
-    { key: 'APP_SECRET',         value: config.appSecret !== 'default_secret' ? config.appSecret : '', desc: 'request authentication' },
+    { key: 'APP_SECRET',         value: config.appSecret, desc: 'request authentication' },
   ];
   let allOk = true;
   for (const { key, value, desc } of checks) {
@@ -24,10 +25,6 @@ function validateEnv(): void {
       console.warn(`[startup]   ✗ ${key} — MISSING — ${desc} will fail!`);
       allOk = false;
     }
-  }
-  if (config.appSecret === 'default_secret') {
-    console.warn('[startup]   ✗ APP_SECRET is the insecure default — set it in Railway dashboard');
-    allOk = false;
   }
   if (allOk) {
     console.log('[startup] All required env vars are configured.');
@@ -44,7 +41,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, x-app-key, Authorization');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, x-app-key, x-device-id, Authorization');
   if (req.method === 'OPTIONS') {
     res.sendStatus(200);
     return;
@@ -70,14 +67,15 @@ app.use((req, res, next) => {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
+  const ready = Boolean(config.openAiKey && config.assemblyAiKey && config.appSecret);
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ok' : 'not_ready',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
     services: {
       openai:     config.openAiKey     ? 'configured' : 'MISSING',
       assemblyai: config.assemblyAiKey ? 'configured' : 'MISSING',
-      appSecret:  config.appSecret !== 'default_secret' ? 'configured' : 'INSECURE_DEFAULT',
+      appSecret:  config.appSecret ? 'configured' : 'MISSING',
     },
   });
 });
@@ -88,6 +86,7 @@ app.get('/', (_req, res) => {
 
 app.use('/api/transcribe', transcribeRouter);
 app.use('/api/summarize', summarizeRouter);
+app.use('/api', studyRouter); // /api/quiz, /api/chat, /api/chapters
 
 // ── Translate route ───────────────────────────────────────────────────────────
 app.post('/api/translate', async (req, res) => {

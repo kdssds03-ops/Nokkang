@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: nokkang-api
+    runtime: node
+    plan: free
+    rootDir: LectureRecorder/lecture-api
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22.22.0"
+      - key: ASSEMBLYAI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: APP_SECRET
+        generateValue: true
