@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 function validateEnv(): void {
   console.log('[startup] Validating required environment variables...');
   const checks = [
-    { key: 'ASSEMBLYAI_API_KEY', value: config.assemblyAiKey, desc: 'transcription (AssemblyAI)' },
+    { key: 'GROQ_API_KEY', value: config.groqKey, desc: 'transcription (Groq)' },
     { key: 'OPENAI_API_KEY',     value: config.openAiKey,     desc: 'summarization / translation / title' },
     { key: 'APP_SECRET',         value: config.appSecret, desc: 'request authentication' },
   ];
@@ -67,14 +67,14 @@ app.use((req, res, next) => {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  const ready = Boolean(config.openAiKey && config.assemblyAiKey && config.appSecret);
+  const ready = Boolean(config.openAiKey && config.groqKey && config.appSecret);
   res.status(ready ? 200 : 503).json({
     status: ready ? 'ok' : 'not_ready',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
     services: {
       openai:     config.openAiKey     ? 'configured' : 'MISSING',
-      assemblyai: config.assemblyAiKey ? 'configured' : 'MISSING',
+      groq: config.groqKey ? 'configured' : 'MISSING',
       appSecret:  config.appSecret ? 'configured' : 'MISSING',
     },
   });

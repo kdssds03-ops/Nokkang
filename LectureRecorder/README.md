@@ -26,7 +26,7 @@
 - ⏱️ 녹음 중 30초 단위 실시간 전사 표시
 - 📂 녹음 파일 폴더별 저장 및 목록 관리
 - ▶️ 녹음 파일 재생 (배속 조절 지원)
-- 📝 음성 텍스트 변환 (STT, AssemblyAI)
+- 📝 음성 텍스트 변환 (STT, Groq)
 - 🤖 강의 종류별 구조화된 AI 요약 노트 (개요, 핵심 포인트, 키워드, 학습 팁)
 - 🌍 번역 기능
 - ⚙️ 설정 관리
@@ -45,12 +45,12 @@
 ### Backend API (`lecture-api/`)
 - Node.js + Express
 - TypeScript
-- AssemblyAI (Speech-to-text)
+- Groq (Speech-to-text)
 - OpenAI GPT-4o-mini (Summarization, Translation)
 
 ### Deployment
 - Mobile: EAS Build (Expo Application Services)
-- Backend: Railway (`https://lecturerecorder-production.up.railway.app`)
+- Backend: Render 무료 Web Service
 
 ---
 
@@ -101,8 +101,8 @@ LectureRecorder/
 # 의존성 설치
 npm install
 
-# 개발 서버 시작
-npx expo start
+# iOS 시뮬레이터에서 로컬 API 사용 (실기기는 컴퓨터의 LAN 주소 사용)
+EXPO_PUBLIC_BACKEND_URL=http://localhost:3000 npx expo start
 ```
 
 ### Backend Setup
@@ -115,15 +115,25 @@ npm install
 
 # 환경변수 설정 (.env 파일 생성)
 echo "OPENAI_API_KEY=your_openai_key" > .env
-echo "ASSEMBLYAI_API_KEY=your_assemblyai_key" >> .env
+echo "GROQ_API_KEY=your_groq_key" >> .env
 echo "APP_SECRET=your_app_secret" >> .env
 
 # 빌드 후 시작
-npm run build && npm start
+npm run build && node --env-file=.env dist/index.js
 
-# 또는 개발 모드로 시작
-npm run dev
+# Node.js 20.6 이상에서 .env를 읽어 실행합니다.
 ```
+
+앱의 **설정 → AI 서버 연결**에서 같은 `APP_SECRET`을 입력합니다. 전사에는 Groq 키가, 요약·번역·챕터·퀴즈·질문에는 OpenAI 키가 필요합니다.
+
+### Render 배포
+
+1. Render에서 **New → Blueprint**로 GitHub 저장소와 배포 브랜치를 연결합니다. 저장소 루트의 `render.yaml`이 `LectureRecorder/lecture-api`를 무료 Web Service로 배포합니다.
+2. Render 대시보드에서 `GROQ_API_KEY`와 `OPENAI_API_KEY`를 입력합니다. Render가 생성한 `APP_SECRET`은 내부 테스트 앱의 **설정 → AI 서버 연결**에서 입력합니다.
+3. 발급된 HTTPS 주소의 `/health`가 HTTP 200을 반환하는지 확인합니다. 이어서 내부 테스트 앱에서 짧은 강의의 전사와 요약을 확인합니다.
+4. Expo 대시보드에서 배포할 EAS 환경의 `EXPO_PUBLIC_BACKEND_URL`에 발급된 주소를 설정하고 새 빌드를 만듭니다. `preview`와 `production`은 각각 설정합니다.
+
+무료 서비스는 유휴 상태에서 잠들 수 있습니다. 앱에 공개되는 환경 변수에는 서버 URL만 저장하고 AI 키와 테스트용 앱 키는 서버에서 관리합니다.
 
 ### Environment Variables
 
@@ -131,7 +141,7 @@ npm run dev
 |--------|------|------|
 | `EXPO_PUBLIC_BACKEND_URL` | 백엔드 서버 URL | `.env` (앱) |
 | `OPENAI_API_KEY` | OpenAI API 키 | 백엔드 환경변수 |
-| `ASSEMBLYAI_API_KEY` | AssemblyAI API 키 | 백엔드 환경변수 |
+| `GROQ_API_KEY` | Groq API 키 | 백엔드 환경변수 |
 | `APP_SECRET` | 앱 인증 시크릿 | 백엔드 환경변수 |
 
 ---

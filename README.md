@@ -25,7 +25,7 @@ AI 기능을 통해 음성 인식(STT), 요약, 번역 기능을 제공합니다
 
 - **Frontend**: React Native, Expo
 - **Language**: TypeScript
-- **AI / API**: AssemblyAI, OpenAI API
+- **AI / API**: Groq, OpenAI API
 - **Etc**: Expo Router
 
 ## 프로젝트 구조

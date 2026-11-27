@@ -20,7 +20,7 @@ import { MaterialIcons, Feather } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useRecordingStore, RecordingMeta, LectureType, LECTURE_TYPE_LABELS, LECTURE_TYPE_ICONS } from '@/store/useRecordingStore';
-import { quickTranscribe, summarizeText, translateText } from '@/api/aiService';
+import { TranscriptionLimitError, quickTranscribe, summarizeText, translateText } from '@/api/aiService';
 import { useSettingsStore } from '@/store/useSettingsStore';
 import { Colors } from '@/constants/Colors';
 import { Spacing, Radius, Typography, Shadows } from '@/constants/theme';
@@ -298,6 +298,7 @@ export default function RecordScreen() {
               text = await quickTranscribe(uriToProcess);
               success = true;
             } catch (err) {
+              if (err instanceof TranscriptionLimitError) break;
               retries++;
               console.warn(`[Transcription] chunk failed, retry ${retries}/3`, err);
               if (retries < 3) {

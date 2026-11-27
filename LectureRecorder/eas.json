@@ -10,18 +10,14 @@
       "ios": {
         "simulator": true
       },
-      "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://lecturerecorder-production.up.railway.app"
-      }
+      "environment": "development"
     },
     "preview": {
       "distribution": "internal",
       "ios": {
         "simulator": false
       },
-      "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://lecturerecorder-production.up.railway.app"
-      }
+      "environment": "preview"
     },
     "production": {
       "distribution": "store",
@@ -31,9 +27,7 @@
       "android": {
         "buildType": "app-bundle"
       },
-      "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://lecturerecorder-production.up.railway.app"
-      }
+      "environment": "production"
     }
   },
   "submit": {

@@ -152,17 +152,6 @@ function assertStatus(res: AxiosResponse): void {
 // Never throw on any HTTP status — we check manually via assertStatus.
 const ACCEPT_ALL = { validateStatus: () => true } as const;
 
-// ── Polling config ────────────────────────────────────────────────────────────
-
-// Initial wait before the first poll: short because AssemblyAI queues fast and
-// short recordings (10–30s) are often done within 3–5s of job submission.
-const POLL_INITIAL_DELAY_MS = 1_000;
-// Subsequent interval between polls after the first attempt.
-const POLL_INTERVAL_MS = 2_000;
-// 1500 attempts × 2 s = 50 min max — covers 60-min lecture recordings
-// (AssemblyAI typically uses ~15% of audio duration for transcription).
-const POLL_MAX_ATTEMPTS = 1_500;
-
 // ── Error classification ──────────────────────────────────────────────────────
 
 /**
@@ -228,246 +217,16 @@ function assertBackendUrl(url: string, context: string): void {
 // ── Exported API functions ────────────────────────────────────────────────────
 // These keep the exact same signatures as before so detail/[id].tsx is unchanged.
 
-/**
- * Upload audio to backend → backend uploads to AssemblyAI → poll until done.
- * Returns formatted transcript (with [화자 A] labels if available).
- *
- * Timing logs (console only, never shown to users) help identify bottlenecks:
- *   [transcribe] upload started
- *   [transcribe] upload done  Xs  → jobId received
- *   [transcribe] poll #N  Xs elapsed
- *   [transcribe] done  total Xs
- */
-export async function transcribeAudio(
-  audioUri: string,
-  recognitionLanguage: RecognitionLanguage = 'auto',
-  diarize: boolean = false
-): Promise<string> {
-  const t0 = Date.now();
-  const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+export class TranscriptionLimitError extends Error {}
+let retryTranscriptionAt = 0;
 
-  console.log(`[transcribeAudio] ▶ started at ${new Date().toISOString()}`);
+export const transcribeAudio = quickTranscribe;
 
-  try {
-    const info = await FileSystem.getInfoAsync(audioUri);
-    if (info.exists && (info as any).size < 4000) {
-      console.log(`[transcribeAudio] audio file too small (${(info as any).size} bytes) — assuming silent and skipping upload.`);
-      return '';
-    }
-  } catch (err) {
-    // Ignore file validation errors and let the network upload try anyway
-  }
-
-  console.log(`[transcribeAudio] EXPO_PUBLIC_BACKEND_URL (raw env): ${process.env.EXPO_PUBLIC_BACKEND_URL}`);
-
-  const baseUrl = await getBackendUrl();
-  assertBackendUrl(baseUrl, 'transcribeAudio'); // throws clear error if blank/malformed
-
-  const normalizedLanguage = normalizeRecognitionLanguage(recognitionLanguage);
-  const languageQuery = buildLanguageQueryParam(normalizedLanguage);
-  const diarizeQuery = diarize ? (languageQuery ? '&diarize=true' : '?diarize=true') : '';
-  const uploadUrl = `${baseUrl}/api/transcribe${languageQuery}${diarizeQuery}`;
-  console.log(`[transcribeAudio] POST endpoint: ${uploadUrl}`);
-  console.log(`[transcribeAudio] local file URI: ${audioUri}`);
-
-  const secret = await getAppSecret();
-  if (!secret) {
-    throw new Error('앱 시크릿 키가 설정되지 않았습니다. 설정 탭에서 입력해 주세요.');
-  }
-
-  // ── Step 1: Upload audio as multipart/form-data ──────────────────────────────
-  const formData = new FormData();
-  formData.append('audio', {
-    uri: audioUri,
-    type: 'audio/m4a',
-    name: 'audio.m4a',
-  } as unknown as Blob);
-  formData.append('language', normalizedLanguage);
-
-  console.log(`[transcribeAudio] upload start | uri=${audioUri} | ${new Date().toISOString()}`);
-  let uploadRes;
-  try {
-    uploadRes = await axios.post(
-      uploadUrl,
-      formData,
-      {
-        headers: {
-          'x-app-key': secret,
-          'x-device-id': await getDeviceId(),
-          'Content-Type': 'multipart/form-data',
-        },
-        // 5 min upload timeout — large files on slow connections need headroom
-        timeout: 300_000,
-        ...ACCEPT_ALL,
-      }
-    );
-    assertStatus(uploadRes);
-  } catch (err: any) {
-    const classified = classifyNetworkError(err, 'transcribeAudio/upload');
-    console.error(`[transcribeAudio] upload FAILED at ${elapsed()}: ${classified.message}`);
-    throw classified;
-  }
-
-  const jobId: string = uploadRes.data?.jobId;
-  if (!jobId) throw new Error('[transcribeAudio] 음성 인식 작업 ID를 받지 못했습니다. 서버 응답: ' + JSON.stringify(uploadRes.data));
-  console.log(`[transcribeAudio] upload done at ${elapsed()} → jobId: ${jobId}`);
-
-  // ── Step 2: Poll until done ──────────────────────────────────────────────────
-  // Poll at 2 s intervals for up to 50 min (1 500 attempts).
-  // This is sufficient for an AssemblyAI transcription of a 60-min lecture
-  // (AssemblyAI targets ~15 % of audio duration).
-  const headers = await buildHeaders();
-  let delay = POLL_INITIAL_DELAY_MS;
-
-  console.log(`[transcribeAudio] polling start | max ${POLL_MAX_ATTEMPTS} attempts × ${POLL_INTERVAL_MS}ms`);
-
-  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
-    await new Promise<void>((resolve) => setTimeout(resolve, delay));
-    delay = POLL_INTERVAL_MS;
-
-    // Log every 30 attempts (~1 min) to keep logs readable for long recordings
-    if (attempt % 30 === 0) {
-      console.log(`[transcribeAudio] poll #${attempt + 1} | ${elapsed()}`);
-    }
-
-    let pollRes;
-    try {
-      pollRes = await axios.get(
-        `${baseUrl}/api/transcribe/${jobId}`,
-        { headers, timeout: 20_000, ...ACCEPT_ALL }
-      );
-      assertStatus(pollRes);
-    } catch (err: any) {
-      const classified = classifyNetworkError(err, `transcribeAudio/poll#${attempt + 1}`);
-      // Transient poll errors: warn and retry rather than aborting the whole job
-      console.warn(`[transcribeAudio] poll #${attempt + 1} transient error: ${classified.message} — retrying`);
-      continue;
-    }
-
-    const { status, transcript, error } = pollRes.data as {
-      status: 'processing' | 'completed' | 'error';
-      transcript?: string;
-      error?: string;
-    };
-
-    if (status === 'completed' && transcript) {
-      console.log(`[transcribeAudio] ✅ completed — total ${elapsed()}`);
-      return transcript;
-    }
-    if (status === 'error') {
-      const isNoSpeech = error?.includes('no spoken audio') || error?.includes('language_detection cannot be performed');
-      if (isNoSpeech) {
-        console.log(`[transcribeAudio] polling detected silent audio safely after ${elapsed()}: ${error}`);
-        return '';
-      }
-      console.error(`[transcribeAudio] job error after ${elapsed()}: ${error}`);
-      throw new Error('음성 인식 실패: ' + (error ?? '알 수 없는 오류'));
-    }
-    // status === 'processing' → continue
-  }
-
-  console.error(`[transcribeAudio] polling timeout after ${elapsed()} (${POLL_MAX_ATTEMPTS} attempts)`);
-  throw new Error(`음성 인식 시간이 초과되었습니다 (${elapsed()}). 녹음이 너무 길거나 서버가 응답하지 않습니다.`);
-}
-
-/**
- * Diarized transcription pass: uploads ALL chunk files, the backend merges them
- * into one continuous file and runs a single speaker-labeled transcription so
- * speaker numbering stays consistent across the whole lecture.
- * Returns the speaker-labeled transcript string plus time-aligned segments
- * (with `speaker`) for seekable, color-coded display.
- */
-export async function transcribeWithSpeakers(
-  uris: string[],
-  recognitionLanguage: RecognitionLanguage = 'auto'
-): Promise<{ transcript: string; segments: import('@/store/useRecordingStore').TranscriptSegment[] }> {
-  if (!uris || uris.length === 0) return { transcript: '', segments: [] };
-
-  const baseUrl = await getBackendUrl();
-  assertBackendUrl(baseUrl, 'transcribeWithSpeakers');
-  const secret = await getAppSecret();
-  if (!secret) throw new Error('앱 시크릿 키가 설정되지 않았습니다. 설정 탭에서 입력해 주세요.');
-
-  const normalizedLanguage = normalizeRecognitionLanguage(recognitionLanguage);
-  const languageQuery = buildLanguageQueryParam(normalizedLanguage);
-
-  const formData = new FormData();
-  uris.forEach((uri, i) => {
-    formData.append('audio', { uri, type: 'audio/m4a', name: `chunk_${i}.m4a` } as unknown as Blob);
-  });
-  formData.append('language', normalizedLanguage);
-
-  let uploadRes;
-  try {
-    uploadRes = await axios.post(
-      `${baseUrl}/api/transcribe/diarize${languageQuery}`,
-      formData,
-      {
-        headers: {
-          'x-app-key': secret,
-          'x-device-id': await getDeviceId(),
-          'Content-Type': 'multipart/form-data',
-        },
-        timeout: 300_000,
-        ...ACCEPT_ALL,
-      }
-    );
-    assertStatus(uploadRes);
-  } catch (err: any) {
-    throw classifyNetworkError(err, 'transcribeWithSpeakers/upload');
-  }
-
-  const jobId: string = uploadRes.data?.jobId;
-  if (!jobId) throw new Error('화자 분리 작업 ID를 받지 못했습니다.');
-
-  const headers = await buildHeaders();
-  let delay = POLL_INITIAL_DELAY_MS;
-
-  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
-    await new Promise<void>((resolve) => setTimeout(resolve, delay));
-    delay = POLL_INTERVAL_MS;
-
-    let pollRes;
-    try {
-      pollRes = await axios.get(
-        `${baseUrl}/api/transcribe/${jobId}`,
-        { headers, timeout: 20_000, ...ACCEPT_ALL }
-      );
-      assertStatus(pollRes);
-    } catch {
-      continue; // transient poll error — retry
-    }
-
-    const { status, transcript, utterances, error } = pollRes.data as {
-      status: 'processing' | 'completed' | 'error';
-      transcript?: string;
-      utterances?: { speaker: string; text: string; start: number; end: number }[];
-      error?: string;
-    };
-
-    if (status === 'completed') {
-      const segments = Array.isArray(utterances)
-        ? utterances.map((u) => ({ startMs: u.start, endMs: u.end, text: u.text, speaker: u.speaker }))
-        : [];
-      return { transcript: transcript ?? '', segments };
-    }
-    if (status === 'error') {
-      throw new Error('화자 분리 전사 실패: ' + (error ?? '알 수 없는 오류'));
-    }
-  }
-
-  throw new Error('화자 분리 전사 시간이 초과되었습니다. 녹음이 너무 길거나 서버가 응답하지 않습니다.');
-}
-
-/**
- * Quick transcription for real-time updates (30s chunks).
- * Returns the text directly.
- * Polling timeout extended to 45s for reliability.
- */
 export async function quickTranscribe(
   audioUri: string,
   recognitionLanguage: RecognitionLanguage = 'auto'
 ): Promise<string> {
+  if (Date.now() < retryTranscriptionAt) throw new TranscriptionLimitError('전사 한도에 도달했습니다. 나중에 다시 시도해 주세요.');
   const t0 = Date.now();
   const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
@@ -482,17 +241,11 @@ export async function quickTranscribe(
   }
 
   const baseUrl = await getBackendUrl();
-  try {
-    assertBackendUrl(baseUrl, 'quickTranscribe');
-  } catch (urlErr: any) {
-    console.error(`[quickTranscribe] invalid backend URL, skipping chunk: ${urlErr.message}`);
-    return '';
-  }
+  assertBackendUrl(baseUrl, 'quickTranscribe');
 
   const secret = await getAppSecret();
   if (!secret) {
-    console.error('[quickTranscribe] no app secret — skipping chunk');
-    return '';
+    throw new Error('설정 → AI 서버 연결에서 앱 키를 입력해 주세요.');
   }
 
   const normalizedLanguage = normalizeRecognitionLanguage(recognitionLanguage);
@@ -518,16 +271,22 @@ export async function quickTranscribe(
           'x-device-id': await getDeviceId(),
           'Content-Type': 'multipart/form-data',
         },
-        // 90 s — chunk transcriptions go through AssemblyAI; allow extra headroom
-        timeout: 90_000,
+        // Allow time for the hosting service to wake up before transcription.
+        timeout: 150_000,
         ...ACCEPT_ALL,
       }
     );
+    if (res.status === 429) {
+      const seconds = Number(res.headers['retry-after']);
+      retryTranscriptionAt = Date.now() + (Number.isFinite(seconds) && seconds > 0 ? seconds : 60) * 1000;
+      throw new TranscriptionLimitError('전사 한도에 도달했습니다. 나중에 다시 시도해 주세요.');
+    }
     assertStatus(res);
     const text = res.data.text ?? '';
     console.log(`[quickTranscribe] ✅ done in ${elapsed()} | chars=${text.length}`);
     return text;
   } catch (err: any) {
+    if (err instanceof TranscriptionLimitError) throw err;
     const classified = classifyNetworkError(err, 'quickTranscribe');
     
     if ((classified as any).isNoSpeech) {
@@ -535,12 +294,7 @@ export async function quickTranscribe(
       return ''; // Gracefully exit without failure
     }
 
-    // Warn (not error) — chunk failures are non-fatal and will be retried by the queue.
-    console.warn(`[quickTranscribe] failed after ${elapsed()}: ${classified.message}`);
-    if (err?.response?.data) {
-      console.warn(`[quickTranscribe] server response body: ${JSON.stringify(err.response.data)}`);
-    }
-    return ''; // Non-fatal: real-time chunk failures degrade gracefully
+    throw classified;
   }
 }
 
@@ -721,29 +475,6 @@ export async function generateQuiz(
   return quiz as import('@/store/useRecordingStore').QuizQuestion[];
 }
 
-
-/**
- * Fetch a short-lived AssemblyAI streaming token from our backend so the app can
- * open the realtime transcription WebSocket directly (lowest latency).
- */
-export async function getStreamToken(): Promise<string> {
-  const baseUrl = await getBackendUrl();
-  assertBackendUrl(baseUrl, 'getStreamToken');
-  const headers = await buildHeaders();
-  if (!headers['x-app-key']) {
-    throw new Error('앱 시크릿 키가 설정되지 않았습니다. 설정 탭에서 입력해 주세요.');
-  }
-  let res;
-  try {
-    res = await axios.post(`${baseUrl}/api/stream-token`, {}, { headers, timeout: 20_000, ...ACCEPT_ALL });
-    assertStatus(res);
-  } catch (err: any) {
-    throw classifyNetworkError(err, 'getStreamToken');
-  }
-  const token = (res.data as { token?: string }).token;
-  if (!token) throw new Error('스트리밍 토큰을 받지 못했습니다.');
-  return token;
-}
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
