@@ -13,7 +13,6 @@
 - 녹음 시작 전 **강의 종류를 선택**하여 AI 요약을 최적화하고
 - 녹음 중 **30초 단위로 실시간 전사** 내용을 확인하고
 - 녹음 완료 후 **강의 종류별 구조화된 AI 요약 노트**를 생성하며
-- 필요한 경우 **번역**까지 제공하여
 
 학습 효율을 극대화하는 것을 목표로 합니다.
 
@@ -28,7 +27,6 @@
 - ▶️ 녹음 파일 재생 (배속 조절 지원)
 - 📝 음성 텍스트 변환 (STT, Groq)
 - 🤖 강의 종류별 구조화된 AI 요약 노트 (개요, 핵심 포인트, 키워드, 학습 팁)
-- 🌍 번역 기능
 - ⚙️ 설정 관리
 
 ---
@@ -46,7 +44,7 @@
 - Node.js + Express
 - TypeScript
 - Groq (Speech-to-text)
-- OpenAI GPT-4o-mini (Summarization, Translation)
+- OpenAI GPT-4o-mini (Summarization)
 
 ### Deployment
 - Mobile: EAS Build (Expo Application Services)
@@ -61,7 +59,7 @@ LectureRecorder/
 ├── app/                    # 앱 화면 (Expo Router)
 │   ├── (tabs)/index.tsx    # 홈 화면 (녹음 목록)
 │   ├── record.tsx          # 녹음 화면 (강의 종류 선택 + 실시간 전사)
-│   ├── detail/[id].tsx     # 상세 화면 (전사 / 구조화 요약 / 번역)
+│   ├── detail/[id].tsx     # 상세 화면 (전사 / 구조화 요약)
 │   ├── settings.tsx        # 설정 화면
 │   └── _layout.tsx         # 루트 레이아웃
 ├── api/
@@ -124,7 +122,7 @@ npm run build && node --env-file=.env dist/index.js
 # Node.js 20.6 이상에서 .env를 읽어 실행합니다.
 ```
 
-앱의 **설정 → AI 서버 연결**에서 같은 `APP_SECRET`을 입력합니다. 전사에는 Groq 키가, 요약·번역·챕터·퀴즈·질문에는 OpenAI 키가 필요합니다.
+앱의 **설정 → AI 서버 연결**에서 같은 `APP_SECRET`을 입력합니다. 전사에는 Groq 키가, 요약에는 OpenAI 키가 필요합니다.
 
 ### Render 배포
 

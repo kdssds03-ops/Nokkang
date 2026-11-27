@@ -1,3 +1,4 @@
+import { useSettingsStore } from './useSettingsStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import { create } from 'zustand';
@@ -65,20 +66,50 @@ export function isStructuredSummary(summary: any): summary is StructuredSummary 
   return typeof summary === 'object' && summary !== null && 'overview' in summary;
 }
 
+export interface QuizQuestion {
+  question: string;
+  options: string[];
+  answerIndex: number;
+  explanation?: string;
+}
+
+export interface Chapter {
+  title: string;
+  startMs: number;
+}
+
+/** A piece of transcript with the audio position where it starts. */
+export interface TranscriptSegment {
+  startMs: number;
+  text: string;
+}
+
+export interface LectureChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface RecordingMeta {
   id: string;
   name: string;
   titleSource?: 'default' | 'ai' | 'user';
   uri: string;
   chunkUris?: string[];
+  chunkDurations?: number[];
   duration: number; // in milliseconds
   createdAt: number;
   folderId: string | null;  // which folder this recording belongs to
   lectureType?: LectureType;
   transcript?: string;
+  transcriptIncomplete?: boolean;
   summary?: string | StructuredSummary;
   translation?: string;
   isSummarizing?: boolean;
+  /** Time-aligned transcript pieces (one per 30s recording chunk). Absent on older recordings. */
+  segments?: TranscriptSegment[];
+  quiz?: QuizQuestion[];
+  chapters?: Chapter[];
+  chat?: LectureChatMessage[];
 }
 
 interface RecordingStore {
@@ -89,7 +120,6 @@ interface RecordingStore {
   moveToFolder: (recordingId: string, folderId: string | null) => void;
   loadRecordings: () => Promise<void>;
   fetchSummary: (recordingId: string) => Promise<void>;
-  generateTitleFromText: (recordingId: string, text: string) => Promise<void>;
   _hasHydrated: boolean;
 }
 
@@ -106,11 +136,12 @@ export const useRecordingStore = create<RecordingStore>((set, get) => ({
   removeRecording: async (id) => {
     const target = get().recordings.find((r) => r.id === id);
 
-    if (target?.uri) {
+    for (const uri of new Set([target?.uri, ...(target?.chunkUris ?? [])])) {
+      if (!uri) continue;
       try {
-        const info = await FileSystem.getInfoAsync(target.uri);
+        const info = await FileSystem.getInfoAsync(uri);
         if (info.exists) {
-          await FileSystem.deleteAsync(target.uri, { idempotent: true });
+          await FileSystem.deleteAsync(uri, { idempotent: true });
         }
       } catch (err) {
         console.warn(`[store] Could not delete audio file for recording ${id}:`, err);
@@ -144,43 +175,6 @@ export const useRecordingStore = create<RecordingStore>((set, get) => ({
     });
   },
 
-  generateTitleFromText: async (recordingId: string, text: string) => {
-    console.log(`[Diagnostic] generateTitleFromText triggered for recordingId: ${recordingId}`);
-    const { recordings, updateRecording } = get();
-    const recording = recordings.find(r => r.id === recordingId);
-
-    // Only auto-generate if 'default' or 'ai'. Never overwrite 'user' titles.
-    if (!recording) {
-      console.log(`[Diagnostic] generateTitleFromText aborted: recording not found`);
-      return;
-    }
-    if (recording.titleSource === 'user') {
-      console.log(`[Diagnostic] generateTitleFromText aborted: titleSource is 'user'`);
-      return;
-    }
-
-    try {
-      console.log(`[Diagnostic] generateTitleFromText: calling generateRecordingTitle API`);
-      const { generateRecordingTitle } = require('@/api/aiService');
-      const newTitle = await generateRecordingTitle(text);
-      console.log(`[Diagnostic] generateTitleFromText: API returned new title -> '${newTitle}'`);
-
-      if (newTitle) {
-        // Guard against race conditions: check state hasn't changed to 'user' during await!
-        const currentRecording = get().recordings.find(r => r.id === recordingId);
-        if (currentRecording && currentRecording.titleSource !== 'user') {
-          console.log(`[Diagnostic] generateTitleFromText: committing title update to store`);
-          updateRecording(recordingId, { name: newTitle, titleSource: 'ai' });
-        } else {
-          console.log(`[Diagnostic] generateTitleFromText aborted on response: user edited title while waiting`);
-        }
-      }
-    } catch (e: any) {
-      console.log(`[Diagnostic] generateTitleFromText API call failed: ${e?.message ?? String(e)}`);
-      console.log('[store] generateTitleFromText failed, silent ignore:', e);
-    }
-  },
-
   fetchSummary: async (recordingId: string) => {
     const { recordings, updateRecording } = get();
     const recording = recordings.find(r => r.id === recordingId);
@@ -192,24 +186,20 @@ export const useRecordingStore = create<RecordingStore>((set, get) => ({
 
     try {
       const { summarizeText } = require('@/api/aiService');
-      const { summary, suggestedName } = await summarizeText(recording.transcript, recording.lectureType || 'general');
+      const { summary, suggestedName } = await summarizeText(recording.transcript, recording.lectureType || 'general', useSettingsStore.getState().summaryLanguage);
 
       const updates: Partial<RecordingMeta> = {
         summary,
         isSummarizing: false
       };
 
-      if (suggestedName && suggestedName.trim() !== '' && recording.titleSource !== 'user') {
+      if (suggestedName && suggestedName.trim() !== '' && get().recordings.find(r => r.id === recordingId)?.titleSource !== 'user') {
         updates.name = suggestedName;
         updates.titleSource = 'ai';
       }
 
       updateRecording(recordingId, updates);
 
-      // Fallback: If no suggestedName arrived natively, trigger the dedicated title flow
-      if (!suggestedName && recording.titleSource !== 'user') {
-        get().generateTitleFromText(recordingId, recording.transcript);
-      }
     } catch (error) {
       updateRecording(recordingId, { isSummarizing: false });
       throw error;

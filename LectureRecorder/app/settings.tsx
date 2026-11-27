@@ -49,11 +49,10 @@ export default function SettingsScreen() {
     recognitionLanguage, setRecognitionLanguage,
     audioQuality, setAudioQuality,
     summaryLanguage, setSummaryLanguage,
-    translationLanguage, setTranslationLanguage,
     _hasHydrated,
   } = useSettingsStore();
 
-  const [tapCount, setTapCount] = useState(0);
+  const [showConnection, setShowConnection] = useState(false);
   const [secretDraft, setSecretDraft] = useState('');
 
   if (!_hasHydrated) {
@@ -78,7 +77,7 @@ export default function SettingsScreen() {
     
     try {
       await Linking.openURL(mailtoUrl);
-    } catch (error) {
+    } catch {
       Alert.alert('오류', '메일 앱을 열 수 없습니다.');
     }
   };
@@ -134,14 +133,6 @@ export default function SettingsScreen() {
               theme={theme}
               onPress={() => toggleLanguageOption(summaryLanguage, setSummaryLanguage)}
             />
-            <View style={[styles.divider, { backgroundColor: theme.border }]} />
-            <SettingRow
-              icon="type"
-              label="기본 번역 언어"
-              value={translationLanguage === 'en' ? '영어' : translationLanguage === 'ja' ? '일본어' : '한국어'}
-              theme={theme}
-              onPress={() => toggleLanguageOption(translationLanguage, setTranslationLanguage)}
-            />
           </View>
 
           <SectionHeader title="정보 & 지원" theme={theme} />
@@ -150,15 +141,17 @@ export default function SettingsScreen() {
             <View style={[styles.divider, { backgroundColor: theme.border }]} />
             <SettingRow icon="mail" label="개발자에게 피드백 보내기" theme={theme} onPress={handleSendFeedback} />
             <View style={[styles.divider, { backgroundColor: theme.border }]} />
-            <SettingRow icon="info" label="앱 버전 정보" value="1.0.0" theme={theme} onPress={() => setTapCount(c => c + 1)} />
+            <SettingRow icon="info" label="앱 버전 정보" value="1.0.0" theme={theme}  />
           </View>
           
-          {tapCount >= 7 && (
+          <SettingRow icon="key" label="AI 서버 연결" theme={theme}
+            onPress={() => setShowConnection(!showConnection)} />
+          {showConnection && (
             <View style={[styles.devPanel, { backgroundColor: theme.surface, borderColor: theme.border, borderWidth: 1 }]}>
-              <Text style={{ color: theme.text, ...Typography.bodyMedium, fontWeight: '700', marginBottom: Spacing.sm }}>개발자 설정</Text>
+              <Text style={{ color: theme.text, ...Typography.bodyMedium, fontWeight: '700', marginBottom: Spacing.sm }}>서버에서 발급받은 앱 키</Text>
               <TextInput
                 style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.background }]}
-                placeholder="App Secret"
+                placeholder="앱 키 입력"
                 placeholderTextColor={theme.textTertiary}
                 value={secretDraft}
                 onChangeText={setSecretDraft}
@@ -167,12 +160,17 @@ export default function SettingsScreen() {
               <TouchableOpacity 
                 style={[styles.saveBtn, { backgroundColor: theme.primary }]}
                 onPress={async () => {
-                  await setAppSecret(secretDraft);
-                  Alert.alert('저장됨');
-                  setTapCount(0);
+                  try {
+                    await setAppSecret(secretDraft);
+                    setSecretDraft('');
+                    setShowConnection(false);
+                    Alert.alert('앱 키를 저장했습니다.');
+                  } catch {
+                    Alert.alert('앱 키를 저장하지 못했습니다.');
+                  }
                 }}
               >
-                <Text style={{ color: '#FFFFFF', ...Typography.bodyMedium, fontWeight: '700' }}>비밀키 업데이트</Text>
+                <Text style={{ color: '#FFFFFF', ...Typography.bodyMedium, fontWeight: '700' }}>앱 키 저장</Text>
               </TouchableOpacity>
             </View>
           )}

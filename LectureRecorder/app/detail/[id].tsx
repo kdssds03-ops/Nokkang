@@ -1,14 +1,15 @@
-import { transcribeAudio, translateText } from '@/api/aiService';
+import { transcribeAudio } from '@/api/aiService';
 import Snackbar from '@/components/Snackbar';
 import { Colors } from '@/constants/Colors';
 import { Radius, Shadows, Spacing, Typography } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useRecordingStore } from '@/store/useRecordingStore';
 import { Feather, MaterialIcons } from '@expo/vector-icons';
-import { Audio } from 'expo-av';
+import { useLecturePlayer } from '@/hooks/useLecturePlayer';
+import { useSettingsStore } from '@/store/useSettingsStore';
 import * as Clipboard from 'expo-clipboard';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -22,7 +23,12 @@ import {
   View,
 } from 'react-native';
 
-type TabType = 'transcript' | 'summary' | 'translation';
+type TabType = 'transcript' | 'summary';
+
+const TABS: { key: TabType; label: string }[] = [
+  { key: 'transcript', label: '음성인식' },
+  { key: 'summary', label: '요약' },
+];
 
 interface StructuredSummary {
   lectureType?: string;
@@ -65,7 +71,6 @@ export default function DetailScreen() {
     id,
     name: paramName,
     duration: paramDuration,
-    createdAt: paramCreatedAt,
   } = useLocalSearchParams<{
     id: string;
     name?: string;
@@ -83,88 +88,47 @@ export default function DetailScreen() {
   const displayName = recording?.name || paramName || '강의 기록';
   const displayDuration = recording?.duration || (paramDuration ? Number(paramDuration) : 0);
 
-  const [activeTab, setActiveTab] = useState<TabType>('transcript');
+  const [activeTab, setActiveTab] = useState<TabType>('summary');
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStatus, setProcessingStatus] = useState('');
 
   const [snackbarVisible, setSnackbarVisible] = useState(false);
+  const dismissSnackbar = useCallback(() => setSnackbarVisible(false), []);
   const [snackbarMessage, setSnackbarMessage] = useState('');
 
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editTitleDraft, setEditTitleDraft] = useState('');
 
-  const [sound, setSound] = useState<Audio.Sound | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [playbackPosition, setPlaybackPosition] = useState(0);
-  const [playbackDuration, setPlaybackDuration] = useState(0);
-  const [playbackRate, setPlaybackRate] = useState<1.0 | 1.2 | 1.5 | 2.0>(1.0);
-
-  const SPEED_STEPS: Array<1.0 | 1.2 | 1.5 | 2.0> = [1.0, 1.2, 1.5, 2.0];
-
-  useEffect(() => {
-    return () => {
-      if (sound) {
-        sound.unloadAsync().catch(() => { });
-      }
-      Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      }).catch(() => { });
-    };
-  }, [sound]);
-
-  const togglePlayback = async () => {
-    if (!recording) return;
-    try {
-      if (sound && isPlaying) {
-        await sound.pauseAsync();
-        setIsPlaying(false);
-      } else if (sound) {
-        await sound.playAsync();
-        setIsPlaying(true);
-      } else {
-        const { sound: newSound } = await Audio.Sound.createAsync(
-          { uri: recording.uri },
-          { shouldPlay: true },
-          (status) => {
-            if (status.isLoaded) {
-              setPlaybackPosition(status.positionMillis ?? 0);
-              setPlaybackDuration(status.durationMillis ?? 0);
-              if (status.didJustFinish) setIsPlaying(false);
-            }
-          }
-        );
-        setSound(newSound);
-        setIsPlaying(true);
-      }
-    } catch (error) {
-      Alert.alert('재생 오류', '오디오를 재생할 수 없습니다.');
-    }
-  };
-
-  const cycleSpeed = async () => {
-    const nextIdx = (SPEED_STEPS.indexOf(playbackRate) + 1) % SPEED_STEPS.length;
-    const nextRate = SPEED_STEPS[nextIdx];
-    setPlaybackRate(nextRate);
-    if (sound) await sound.setRateAsync(nextRate, true);
-  };
+  const { isPlaying, playbackPosition, playbackDuration, playbackRate, togglePlayback, cycleSpeed } =
+    useLecturePlayer(recording?.uri, recording?.chunkUris, recording?.chunkDurations);
 
   const handleTranscribe = useCallback(async () => {
     if (!recording) return;
     setIsProcessing(true);
     setProcessingStatus('오디오 분석 중...');
     try {
-      const result = await transcribeAudio(recording.uri);
-      updateRecording(recording.id, { transcript: result });
-      const { generateTitleFromText } = useRecordingStore.getState();
-      generateTitleFromText(recording.id, result);
+      const files = recording.chunkUris?.length ? recording.chunkUris : [recording.uri];
+      const segments = [];
+      let startMs = 0;
+      for (const [index, uri] of files.entries()) {
+        setProcessingStatus(`음성 인식 중 (${index + 1}/${files.length})`);
+        const text = await transcribeAudio(uri, useSettingsStore.getState().recognitionLanguage);
+        if (text.trim()) segments.push({ startMs, text });
+        startMs += recording.chunkDurations?.[index] || 30000;
+      }
+      const result = segments.map(segment => segment.text).join('\n\n');
+      if (!result) {
+        Alert.alert('음성 인식', '녹음에서 인식된 말소리가 없습니다.');
+        return;
+      }
+      updateRecording(recording.id, { transcript: result, segments, transcriptIncomplete: false });
     } catch (error: any) {
       Alert.alert('음성 인식 실패', API_ERROR_MESSAGES[classifyApiError(error)]);
     } finally {
       setIsProcessing(false);
       setProcessingStatus('');
     }
-  }, [recording]);
+  }, [recording, updateRecording]);
 
   const handleSummarize = useCallback(async () => {
     if (!recording || !recording.transcript) {
@@ -181,27 +145,7 @@ export default function DetailScreen() {
       setIsProcessing(false);
       setProcessingStatus('');
     }
-  }, [recording]);
-
-  const handleTranslate = useCallback(async () => {
-    if (!recording || !recording.transcript) {
-      Alert.alert('알림', '먼저 음성을 텍스트로 변환해 주세요.');
-      return;
-    }
-    setIsProcessing(true);
-    setProcessingStatus('번역 중...');
-    try {
-      const { useSettingsStore } = require('@/store/useSettingsStore');
-      const translationLanguage = useSettingsStore.getState().translationLanguage || 'en';
-      const result = await translateText(recording.transcript, translationLanguage);
-      updateRecording(recording.id, { translation: result });
-    } catch (error: any) {
-      Alert.alert('번역 실패', API_ERROR_MESSAGES[classifyApiError(error)]);
-    } finally {
-      setIsProcessing(false);
-      setProcessingStatus('');
-    }
-  }, [recording]);
+  }, [recording, fetchSummary]);
 
   const handleCopy = async () => {
     if (!recording) return;
@@ -228,12 +172,6 @@ export default function DetailScreen() {
       } else {
         textToCopy = String(recording.summary);
       }
-    } else if (activeTab === 'translation' && recording.translation) {
-      textToCopy = recording.translation;
-    } else if (activeTab === 'translation' && !recording.translation) {
-      setSnackbarMessage('복사할 번역 내용이 없습니다.');
-      setSnackbarVisible(true);
-      return;
     }
 
     if (textToCopy && textToCopy.trim()) {
@@ -241,7 +179,7 @@ export default function DetailScreen() {
         await Clipboard.setStringAsync(textToCopy);
         setSnackbarMessage('클립보드에 복사되었습니다.');
         setSnackbarVisible(true);
-      } catch (err) {
+      } catch {
         setSnackbarMessage('복사에 실패했습니다.');
         setSnackbarVisible(true);
       }
@@ -258,7 +196,8 @@ export default function DetailScreen() {
     return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   };
 
-  const progressWidth = playbackDuration > 0 ? (playbackPosition / playbackDuration) * 100 : 0;
+  const totalDuration = playbackDuration || displayDuration;
+  const progressWidth = totalDuration > 0 ? Math.min(100, playbackPosition / totalDuration * 100) : 0;
 
   const renderTranscript = (text: string) => {
     const lines = text.split('\n');
@@ -375,37 +314,53 @@ export default function DetailScreen() {
           <Feather name="chevron-left" size={24} color={theme.text} />
         </TouchableOpacity>
 
-        <View style={[styles.pillTabsContainer, { backgroundColor: theme.unselectedChip }]}>
-          {(['transcript', 'summary', 'translation'] as TabType[]).map((tab) => (
-            <TouchableOpacity
-              key={tab}
-              onPress={() => setActiveTab(tab)}
-              style={[
-                styles.pillTab,
-                activeTab === tab &&
-                [styles.pillTabActive, { backgroundColor: theme.surface, ...Shadows.soft }],
-              ]}
-              disabled={isProcessing}
-            >
-              <Text
-                style={[
-                  styles.pillTabText,
-                  { color: activeTab === tab ? theme.text : theme.textSecondary },
-                ]}
-              >
-                {tab === 'transcript' ? '음성인식' : tab === 'summary' ? '요약' : '메모'}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+        <Text style={[styles.headerTitle, { color: theme.text }]} numberOfLines={1}>
+          {displayName}
+        </Text>
 
         <TouchableOpacity
-          onPress={() => setIsEditingTitle(true)}
+          onPress={() => {
+            setEditTitleDraft(displayName);
+            setIsEditingTitle(true);
+          }}
           style={[styles.circularButton, { backgroundColor: theme.surface, ...Shadows.soft }]}
         >
           <Feather name="more-horizontal" size={24} color={theme.text} />
         </TouchableOpacity>
       </View>
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.tabScroller}
+        contentContainerStyle={styles.tabScrollerContent}
+      >
+        <View style={[styles.pillTabsContainer, { backgroundColor: theme.unselectedChip }]}>
+          {TABS.map(({ key, label }) => (
+            <TouchableOpacity
+              key={key}
+              onPress={() => setActiveTab(key)}
+              style={[
+                styles.pillTab,
+                activeTab === key &&
+                [styles.pillTabActive, { backgroundColor: theme.surface, ...Shadows.soft }],
+              ]}
+              disabled={isProcessing}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: activeTab === key }}
+            >
+              <Text
+                style={[
+                  styles.pillTabText,
+                  { color: activeTab === key ? theme.text : theme.textSecondary },
+                ]}
+              >
+                {label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </ScrollView>
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
@@ -445,8 +400,11 @@ export default function DetailScreen() {
             </View>
 
             <Text style={[styles.timeText, { color: theme.textSecondary, marginRight: Spacing.sm }]}>
-              {formatTime(playbackDuration || displayDuration)}
+              {formatTime(totalDuration)}
             </Text>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="재생 속도 변경" onPress={cycleSpeed}>
+              <Text style={[styles.timeText, { color: theme.primary }]}>{playbackRate}×</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -461,7 +419,14 @@ export default function DetailScreen() {
             </View>
           ) : activeTab === 'transcript' ? (
             recording?.transcript ? (
-              <View style={styles.transcriptSection}>{renderTranscript(recording.transcript)}</View>
+              <View style={styles.transcriptSection}>
+                {recording.transcriptIncomplete && (
+                  <TouchableOpacity style={[styles.actionButton, { backgroundColor: theme.primary }]} onPress={handleTranscribe}>
+                    <Text style={styles.actionButtonText}>일부 구간 인식 실패 · 전체 다시 인식</Text>
+                  </TouchableOpacity>
+                )}
+                {renderTranscript(recording.transcript)}
+              </View>
             ) : (
               <View style={styles.emptyContentContainer}>
                 <Text style={[styles.emptyContentText, { color: theme.textSecondary }]}>
@@ -472,7 +437,7 @@ export default function DetailScreen() {
                 </TouchableOpacity>
               </View>
             )
-          ) : activeTab === 'summary' ? (
+          ) : (
             recording?.summary ? (
               renderSummary()
             ) : (
@@ -485,25 +450,12 @@ export default function DetailScreen() {
                 </TouchableOpacity>
               </View>
             )
-          ) : (
-            recording?.translation ? (
-              <Text style={[styles.transcriptBody, { color: theme.text }]}>{recording.translation}</Text>
-            ) : (
-              <View style={styles.emptyContentContainer}>
-                <Text style={[styles.emptyContentText, { color: theme.textSecondary }]}>
-                  텍스트 변환 후 번역을 시작해보세요
-                </Text>
-                <TouchableOpacity style={[styles.actionButton, { backgroundColor: theme.primary, ...Shadows.soft }]} onPress={handleTranslate}>
-                  <Text style={styles.actionButtonText}>메모 작성 / 번역하기</Text>
-                </TouchableOpacity>
-              </View>
-            )
           )}
         </View>
       </ScrollView>
 
       {/* Bottom Action Area (Copy & Re-summarize) */}
-      {recording?.transcript && (
+      {(activeTab === 'summary' ? recording?.summary : recording?.transcript) ? (
         <View style={styles.bottomActionArea}>
           <TouchableOpacity
             style={[styles.outlineButton, { borderColor: theme.border, backgroundColor: theme.surface, ...Shadows.soft }]}
@@ -511,10 +463,10 @@ export default function DetailScreen() {
             activeOpacity={0.7}
           >
             <Feather name="copy" size={18} color={theme.textSecondary} style={{ marginRight: Spacing.sm }} />
-            <Text style={[styles.outlineButtonText, { color: theme.textSecondary }]}>Copy</Text>
+            <Text style={[styles.outlineButtonText, { color: theme.textSecondary }]}>복사</Text>
           </TouchableOpacity>
         </View>
-      )}
+      ) : null}
 
       {/* Title edit modal */}
       <Modal visible={isEditingTitle} transparent animationType="fade">
@@ -544,7 +496,7 @@ export default function DetailScreen() {
               <TouchableOpacity
                 style={[styles.modalButton, { backgroundColor: theme.text }]}
                 onPress={() => {
-                  if (editTitleDraft.trim()) updateRecording(id as string, { name: editTitleDraft.trim() });
+                  if (editTitleDraft.trim()) updateRecording(id as string, { name: editTitleDraft.trim(), titleSource: 'user' });
                   setIsEditingTitle(false);
                 }}
               >
@@ -560,7 +512,7 @@ export default function DetailScreen() {
       <Snackbar
         visible={snackbarVisible}
         message={snackbarMessage}
-        onDismiss={() => setSnackbarVisible(false)}
+        onDismiss={dismissSnackbar}
       />
     </SafeAreaView>
   );
@@ -578,6 +530,19 @@ const styles = StyleSheet.create({
     borderRadius: Radius.pill,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  headerTitle: {
+    ...Typography.bodyLarge,
+    flex: 1,
+    textAlign: 'center',
+    marginHorizontal: Spacing.md,
+  },
+  tabScroller: {
+    flexGrow: 0,
+    flexShrink: 0, // otherwise a tall tab body squeezes the row and clips the labels
+  },
+  tabScrollerContent: {
+    paddingHorizontal: Spacing.screenPadding,
   },
   pillTabsContainer: {
     flexDirection: 'row',

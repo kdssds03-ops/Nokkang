@@ -2,7 +2,6 @@ import express from 'express';
 import { config } from './config';
 import transcribeRouter from './routes/transcribe';
 import summarizeRouter from './routes/summarize';
-import studyRouter from './routes/study';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,7 +13,7 @@ function validateEnv(): void {
   console.log('[startup] Validating required environment variables...');
   const checks = [
     { key: 'GROQ_API_KEY', value: config.groqKey, desc: 'transcription (Groq)' },
-    { key: 'OPENAI_API_KEY',     value: config.openAiKey,     desc: 'summarization / translation / title' },
+    { key: 'OPENAI_API_KEY',     value: config.openAiKey,     desc: 'summarization' },
     { key: 'APP_SECRET',         value: config.appSecret, desc: 'request authentication' },
   ];
   let allOk = true;
@@ -86,103 +85,6 @@ app.get('/', (_req, res) => {
 
 app.use('/api/transcribe', transcribeRouter);
 app.use('/api/summarize', summarizeRouter);
-app.use('/api', studyRouter); // /api/quiz, /api/chat, /api/chapters
-
-// ── Translate route ───────────────────────────────────────────────────────────
-app.post('/api/translate', async (req, res) => {
-  const { text, targetLang = 'English' } = req.body as { text?: string; targetLang?: string };
-
-  if (!text || text.trim().length === 0) {
-    res.status(400).json({ error: 'Request body must include a non-empty "text" field.' });
-    return;
-  }
-
-  if (text.length > 80_000) {
-    res.status(400).json({ error: 'Text is too long.' });
-    return;
-  }
-
-  try {
-    const axios = require('axios');
-    const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: `당신은 전문 번역가입니다. 주어진 텍스트를 ${targetLang}로 자연스럽게 번역해 주세요. 번역문만 출력하고 다른 설명은 포함하지 마세요.`,
-          },
-          {
-            role: 'user',
-            content: text,
-          },
-        ],
-        temperature: 0.2,
-        max_tokens: 4000,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${config.openAiKey}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 60_000,
-      }
-    );
-
-    const translation: string = response.data.choices[0].message.content;
-    res.json({ translation });
-  } catch (err: any) {
-    console.error('[translate] Error:', err.response?.data ?? err.message);
-    res.status(500).json({ error: '번역에 실패했습니다.' });
-  }
-});
-
-// ── Title generation route ────────────────────────────────────────────────────
-app.post('/api/title', async (req, res) => {
-  const { text } = req.body as { text?: string };
-
-  if (!text || text.trim().length === 0) {
-    res.status(400).json({ error: 'Request body must include a non-empty "text" field.' });
-    return;
-  }
-
-  try {
-    const axios = require('axios');
-    const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: '주어진 강의 내용을 보고 가장 적합한 제목을 한국어로 20자 이내로 작성하세요. 제목만 출력하고 다른 설명은 포함하지 마세요.',
-          },
-          {
-            role: 'user',
-            content: text.slice(0, 3000), // Use first 3000 chars for title
-          },
-        ],
-        temperature: 0.3,
-        max_tokens: 50,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${config.openAiKey}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 30_000,
-      }
-    );
-
-    const title: string = response.data.choices[0].message.content.trim();
-    res.json({ title });
-  } catch (err: any) {
-    console.error('[title] Error:', err.response?.data ?? err.message);
-    res.status(500).json({ error: '제목 생성에 실패했습니다.' });
-  }
-});
-
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });

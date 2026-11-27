@@ -20,7 +20,7 @@ import { MaterialIcons, Feather } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useRecordingStore, RecordingMeta, LectureType, LECTURE_TYPE_LABELS, LECTURE_TYPE_ICONS } from '@/store/useRecordingStore';
-import { TranscriptionLimitError, quickTranscribe, summarizeText, translateText } from '@/api/aiService';
+import { TranscriptionLimitError, quickTranscribe, summarizeText } from '@/api/aiService';
 import { useSettingsStore } from '@/store/useSettingsStore';
 import { Colors } from '@/constants/Colors';
 import { Spacing, Radius, Typography, Shadows } from '@/constants/theme';
@@ -127,14 +127,22 @@ export default function RecordScreen() {
   const colorScheme = useColorScheme() ?? 'light';
   const theme = Colors[colorScheme];
   const { addRecording, updateRecording, removeRecording } = useRecordingStore();
-  const { translationLanguage } = useSettingsStore();
+  const { recognitionLanguage, audioQuality, summaryLanguage } = useSettingsStore();
 
   // ── Lecture type selection ────────────────────────────────────────────────
   const [selectedLectureType, setSelectedLectureType] = useState<LectureType>('general');
   const [isTypePickerVisible, setIsTypePickerVisible] = useState(false);
 
   // ── Recording state ───────────────────────────────────────────────────────
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const rollover = useRef<Promise<void> | null>(null);
+  const lengths = useRef<number[]>([]);
+  const highQuality = Audio.RecordingOptionsPresets.HIGH_QUALITY;
+  const options = audioQuality === 'high' ? highQuality : {
+    ...highQuality,
+    ios: { ...highQuality.ios, bitRate: 64000, numberOfChannels: 1 },
+    android: { ...highQuality.android, bitRate: 64000, numberOfChannels: 1 },
+  };
   const recordingRef = useRef<Audio.Recording | null>(null);
   const activeRecordingIdRef = useRef<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
@@ -171,7 +179,7 @@ export default function RecordScreen() {
   const scheduleNextRollover = () => {
     clearRolloverTimer();
     rolloverTimeoutRef.current = setTimeout(() => {
-      cycleChunk();
+      rollover.current = cycleChunk();
     }, 30000);
   };
 
@@ -208,7 +216,7 @@ export default function RecordScreen() {
       pulseAnim.setValue(1);
     }
     return () => clearInterval(interval);
-  }, [isRecording]);
+  }, [isRecording, pulseAnim]);
 
   // ── Global Audio Session Cleanup on Unmount ───────────────────────────────
   useEffect(() => {
@@ -216,6 +224,7 @@ export default function RecordScreen() {
       console.log('[RecordScreen] Unmounting, performing emergency cleanup...');
       clearRolloverTimer();
       if (isRecordingRef.current) {
+        isRecordingRef.current = false;
         console.log('[RecordScreen] Stopping active recording during unmount');
         recordingRef.current?.stopAndUnloadAsync().catch(err =>
           console.warn('[RecordScreen] Unmount stop failed:', err)
@@ -295,7 +304,7 @@ export default function RecordScreen() {
 
           while (!success && retries < 3) {
             try {
-              text = await quickTranscribe(uriToProcess);
+              text = await quickTranscribe(uriToProcess, recognitionLanguage);
               success = true;
             } catch (err) {
               if (err instanceof TranscriptionLimitError) break;
@@ -377,15 +386,8 @@ export default function RecordScreen() {
     setIsAIUpdating(true);
 
     try {
-      const [sumRes, transRes] = await Promise.all([
-        summarizeText(fullTranscript, selectedLectureType),
-        translateText(fullTranscript, translationLanguage)
-      ]);
-
-      const updates: any = {
-        summary: sumRes.summary,
-        translation: transRes,
-      };
+      const sumRes = await summarizeText(fullTranscript, selectedLectureType, summaryLanguage);
+      const updates: Partial<RecordingMeta> = { summary: sumRes.summary };
 
       if (sumRes.suggestedName) {
         updates.name = sumRes.suggestedName;
@@ -416,13 +418,14 @@ export default function RecordScreen() {
     }
 
     const chunkIndex = chunkCounterRef.current;
-    const startSec = chunkIndex * 30;
+    const startSec = Math.round(lengths.current.reduce((a, b) => a + b, 0) / 1000);
     chunkCounterRef.current += 1;
 
     console.log(`[cycleChunk] ▶ starting rollover for chunk #${chunkIndex} | elapsed ${Math.round(durationRef.current / 1000)}s`);
 
     try {
-      await currentRec.stopAndUnloadAsync();
+      const stopped = await currentRec.stopAndUnloadAsync();
+      recordingRef.current = null;
       const rawUri = currentRec.getURI();
       console.log(`[cycleChunk] chunk #${chunkIndex} stopped | raw URI: ${rawUri}`);
 
@@ -436,6 +439,11 @@ export default function RecordScreen() {
           stableUri = null;
         } else {
           chunkUrisRef.current.push(stableUri);
+          lengths.current.push(stopped.durationMillis || 30000);
+          if (activeRecordingIdRef.current) updateRecording(activeRecordingIdRef.current, {
+            uri: chunkUrisRef.current[0], chunkUris: [...chunkUrisRef.current],
+            chunkDurations: [...lengths.current], duration: lengths.current.reduce((a, b) => a + b, 0),
+          });
           console.log(`[cycleChunk] ✅ chunk #${chunkIndex} persisted | size=${validation.size} bytes`);
         }
       }
@@ -453,10 +461,14 @@ export default function RecordScreen() {
           playThroughEarpieceAndroid: false,
         });
         const { recording: newRec } = await Audio.Recording.createAsync(
-          Audio.RecordingOptionsPresets.HIGH_QUALITY
+          options
         );
         recordingRef.current = newRec;
-        setRecording(newRec);
+        if (!isRecordingRef.current && !isStoppingRef.current) {
+          await newRec.stopAndUnloadAsync();
+          recordingRef.current = null;
+          return;
+        }
         console.log(`[cycleChunk] ✅ new recording started for chunk #${chunkCounterRef.current}`);
         scheduleNextRollover();
       } else {
@@ -500,7 +512,7 @@ export default function RecordScreen() {
 
   // ── Start recording ───────────────────────────────────────────────────────
   const startRecording = async () => {
-    if (isStartingRecording || isRecording) return;
+    if (isStartingRecording || isRecording || isStoppingRef.current) return;
 
     setIsStartingRecording(true);
     console.log('[Recording] Attempting to start recording...');
@@ -544,12 +556,14 @@ export default function RecordScreen() {
 
       console.log('[Recording] Creating new recording instance...');
       const { recording: newRec } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
+        options
       );
 
       const recordingId = Date.now().toString();
       activeRecordingIdRef.current = recordingId;
       chunkCounterRef.current = 0;
+      chunkUrisRef.current = [];
+      lengths.current = [];
 
       console.log('[Recording] Initializing session in store with ID:', recordingId);
       const initialRecording: RecordingMeta = {
@@ -566,7 +580,7 @@ export default function RecordScreen() {
       addRecording(initialRecording);
 
       recordingRef.current = newRec;
-      setRecording(newRec);
+
       setIsRecording(true);
       isRecordingRef.current = true;
       setDuration(0);
@@ -580,7 +594,7 @@ export default function RecordScreen() {
       console.warn('[Recording] Startup failed:', err);
       try {
         await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
-      } catch (_) {}
+      } catch {}
       Alert.alert('녹음 시작 실패', '녹음을 시작할 수 없습니다. 마이크가 다른 앱에서 사용 중인지 확인해 주세요.');
     } finally {
       setIsStartingRecording(false);
@@ -589,25 +603,22 @@ export default function RecordScreen() {
 
   // ── Stop recording ────────────────────────────────────────────────────────
   const stopRecording = async () => {
-    if (!isRecording) return;
+    if (!isRecordingRef.current) return;
 
     // Set both flags atomically so cycleChunk will not start a new recording object
     isRecordingRef.current = false;
     isStoppingRef.current = true;
+    setIsSaving(true);
     setIsRecording(false);
     clearRolloverTimer();
     console.log(`[stopRecording] ▶ triggered | session duration: ${Math.round(durationRef.current / 1000)}s | chunks accumulated: ${chunkCounterRef.current}`);
 
-    const currentRec = recordingRef.current;
-    if (!currentRec) {
-      console.warn('[stopRecording] No active recording ref found during stop');
-      return;
-    }
-
     try {
-      console.log('[stopRecording] ■ stopping and unloading recording...');
-      await currentRec.stopAndUnloadAsync();
-      console.log('[stopRecording] stopAndUnloadAsync done');
+      await rollover.current;
+      const currentRec = recordingRef.current;
+      const stopped = await currentRec?.stopAndUnloadAsync();
+      recordingRef.current = null;
+      const finalStart = lengths.current.reduce((a, b) => a + b, 0);
 
       console.log('[stopRecording] resetting audio mode...');
       await Audio.setAudioModeAsync({
@@ -615,7 +626,7 @@ export default function RecordScreen() {
         playsInSilentModeIOS: true,
       });
 
-      const rawUri = currentRec.getURI();
+      const rawUri = currentRec?.getURI();
       console.log(`[stopRecording] original URI from getURI(): ${rawUri}`);
 
       let stableUri: string | null = null;
@@ -634,6 +645,7 @@ export default function RecordScreen() {
           stableUri = null;
         } else {
           chunkUrisRef.current.push(stableUri);
+          lengths.current.push(stopped?.durationMillis || Math.max(1, durationRef.current - finalStart));
         }
       } else {
         console.warn('[stopRecording] getURI() returned null/empty');
@@ -642,7 +654,7 @@ export default function RecordScreen() {
       // Transcribe final piece
       if (stableUri) {
         const chunkIndex = chunkCounterRef.current;
-        const startSec = chunkIndex * 30;
+        const startSec = Math.round(finalStart / 1000);
         chunkCounterRef.current += 1;
         console.log(`[stopRecording] ▶ triggering transcription for final chunk #${chunkIndex} | URI: ${stableUri}`);
         if (!processedOrQueuedChunksRef.current.has(chunkIndex)) {
@@ -660,6 +672,11 @@ export default function RecordScreen() {
         console.warn('[stopRecording] no valid final URI — skipping transcription of final chunk');
       }
 
+      if (!chunkUrisRef.current.length) throw new Error('녹음 파일이 비어 있습니다.');
+      if (activeRecordingIdRef.current) updateRecording(activeRecordingIdRef.current, {
+        uri: chunkUrisRef.current[0], chunkUris: [...chunkUrisRef.current],
+        chunkDurations: [...lengths.current], duration: lengths.current.reduce((a, b) => a + b, 0),
+      });
       setIsTranscribing(true);
       console.log('[stopRecording] waiting for transcription queue to drain...');
       while (chunkQueueRef.current.length > 0 || isProcessorRunningRef.current) {
@@ -676,12 +693,17 @@ export default function RecordScreen() {
         updateRecording(activeRecordingIdRef.current, {
           uri: rootUri,
           chunkUris: [...chunkUrisRef.current],
-          duration: durationRef.current,
+          duration: lengths.current.reduce((a, b) => a + b, 0),
           transcript: fullString,
+          transcriptIncomplete: transcriptChunksRef.current.some(c => c.text === '[인식 실패]'),
+          segments: transcriptChunksRef.current
+            .filter((c) => !c.isPending && c.text && c.text !== '[인식 실패]')
+            .sort((a, b) => a.startSec - b.startSec)
+            .map((c) => ({ startMs: Math.round(c.startSec * 1000), text: c.text })),
         });
 
         console.log('[stopRecording] running final AI pass...');
-        await generateFinalAIContent();
+        if (!transcriptChunksRef.current.some(c => c.text === '[인식 실패]')) await generateFinalAIContent();
 
         console.log(`[stopRecording] ✅ recording saved | id=${activeRecordingIdRef.current} | chunks=${chunkUrisRef.current.length} | transcript=${fullString.length} chars`);
         activeRecordingIdRef.current = null;
@@ -690,12 +712,16 @@ export default function RecordScreen() {
       }
     } catch (err) {
       console.error('[stopRecording] ❌ failed:', err);
+      Alert.alert('녹음 저장 오류', '녹음을 마무리하지 못했습니다. 저장된 구간은 기본 노트에서 확인해 주세요.');
+    } finally {
       isStoppingRef.current = false;
+      setIsSaving(false);
     }
   };
 
   // ── Cancel recording ──────────────────────────────────────────────────────
   const handleClose = () => {
+    if (isStoppingRef.current || isStartingRecording) return;
     if (isRecording) {
       Alert.alert(
         '녹음 중단',
@@ -714,14 +740,15 @@ export default function RecordScreen() {
               activeRecordingIdRef.current = null;
 
               try {
+                await rollover.current;
+                await recordingRef.current?.stopAndUnloadAsync().catch(() => {});
                 if (idToDelete) {
                   await removeRecording(idToDelete);
                 }
-                await recordingRef.current?.stopAndUnloadAsync();
                 await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
-              } catch (_) {}
+              } catch {}
               recordingRef.current = null;
-              setRecording(null);
+
               router.back();
             },
           },
@@ -865,9 +892,9 @@ export default function RecordScreen() {
             style={[styles.mainButton, { backgroundColor: theme.primary, ...Shadows.floating }]}
             onPress={startRecording}
             activeOpacity={0.8}
-            disabled={isStartingRecording}
+            disabled={isStartingRecording || isSaving}
           >
-            {isStartingRecording ? (
+            {isStartingRecording || isSaving ? (
               <ActivityIndicator size="small" color="#FFFFFF" />
             ) : (
               <MaterialIcons name="mic" size={36} color="#FFFFFF" />
