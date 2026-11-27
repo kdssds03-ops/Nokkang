@@ -37,18 +37,9 @@ const LECTURE_TYPE_LABELS: Record<LectureType, string> = {
 
 // ── Chunking configuration ─────────────────────────────────────────────────────
 //
-// gpt-4o-mini has a 128k-token context window, but quality degrades with very
-// long inputs. 12,000 chars ≈ ~3,000 tokens — high quality per-chunk, and lets
-// us keep ≤4 concurrent parallel calls to avoid OpenAI rate-limit hits.
-//
-// The threshold for enabling chunking is set intentionally higher (20,000 chars)
-// so that short/medium lectures go through the simple direct path without any
-// overhead. A 60-minute lecture transcript is typically 80,000–150,000 chars
-// and will be split into 7–13 chunks.
-const CHUNK_SIZE_CHARS   = 12_000; // target chars per chunk
-const CHUNK_OVERLAP_CHARS =    200; // overlap to preserve context across boundaries
-const DIRECT_PATH_LIMIT  = 20_000; // below this: single call, no chunking
-const MAX_CONCURRENT     =      4; // parallel chunk summarization calls
+const CHUNK_SIZE_CHARS = 3200;
+const CHUNK_OVERLAP_CHARS = 100;
+const DIRECT_PATH_LIMIT = CHUNK_SIZE_CHARS;
 
 /**
  * Splits text into overlapping chunks at paragraph or sentence boundaries.
@@ -82,35 +73,12 @@ function splitIntoChunks(text: string): string[] {
 
     chunks.push(text.slice(start, end).trim());
 
+    if (end >= text.length) break;
     // Advance start with overlap so context isn't lost at boundaries
     start = Math.max(start + 1, end - CHUNK_OVERLAP_CHARS);
   }
 
   return chunks.filter(c => c.length > 0);
-}
-
-/**
- * Run an array of async tasks with bounded concurrency.
- * Resolves to an array of results in the same order as tasks.
- */
-async function pooledMap<T, U>(
-  items: T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<U>
-): Promise<U[]> {
-  const results: U[] = new Array(items.length);
-  let nextIndex = 0;
-
-  async function worker(): Promise<void> {
-    while (nextIndex < items.length) {
-      const i = nextIndex++;
-      results[i] = await fn(items[i], i);
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
-  await Promise.all(workers);
-  return results;
 }
 
 // ── Prompt builders ───────────────────────────────────────────────────────────
@@ -225,9 +193,9 @@ function buildMergePrompt(lectureType: LectureType, language: SummaryLanguage, t
   return `${fullPrompt}\n\n중요: 긴 강의(분야: ${label})의 ${totalChunks}개 연속 구간에서 추출한 내용이 제공됩니다. 모든 구간을 하나의 일관되고 포괄적인 요약으로 통합하세요. 중복 내용을 제거하고 논리적 흐름을 유지하며, 최종 출력이 전체 강의를 대표하도록 하세요.`;
 }
 
-// ── OpenAI call helper ────────────────────────────────────────────────────────
+// ── Groq call helper ────────────────────────────────────────────────────────
 
-interface OpenAICallOptions {
+interface GroqCallOptions {
   systemPrompt: string;
   userContent: string;
   maxTokens?: number;
@@ -235,24 +203,26 @@ interface OpenAICallOptions {
   label?: string;
 }
 
-async function callOpenAI(opts: OpenAICallOptions): Promise<string> {
+async function callGroq(opts: GroqCallOptions): Promise<string> {
   const { systemPrompt, userContent, maxTokens = 3000, timeout = 120_000, label = 'openai' } = opts;
 
   const response = await axios.post(
-    'https://api.openai.com/v1/chat/completions',
+    'https://api.groq.com/openai/v1/chat/completions',
     {
-      model: 'gpt-4o-mini',
+      model: 'qwen/qwen3.8-27b',
+      reasoning_effort: 'none',
+      reasoning_format: 'hidden',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user',   content: userContent },
       ],
       temperature: 0.3,
-      max_tokens: maxTokens,
+      max_completion_tokens: maxTokens,
       response_format: { type: 'json_object' },
     },
     {
       headers: {
-        Authorization: `Bearer ${config.openAiKey}`,
+        Authorization: `Bearer ${config.groqKey}`,
         'Content-Type': 'application/json',
       },
       timeout,
@@ -267,7 +237,7 @@ async function callOpenAI(opts: OpenAICallOptions): Promise<string> {
 // ── Summarization paths ───────────────────────────────────────────────────────
 
 /**
- * Direct path: single OpenAI call for short transcripts (<= DIRECT_PATH_LIMIT).
+ * Direct path: single Groq call for short transcripts (<= DIRECT_PATH_LIMIT).
  * Identical to the original behavior, fully backwards-compatible.
  */
 async function summarizeDirect(
@@ -282,7 +252,7 @@ async function summarizeDirect(
     ? `Analyze the following lecture transcript and summarize it in JSON format:\n\n${text}`
     : `分析以下讲座录音稿，并以JSON格式总结：\n\n${text}`;
 
-  const rawContent = await callOpenAI({ systemPrompt, userContent, maxTokens: 3000, timeout: 120_000, label: 'direct' });
+  const rawContent = await callGroq({ systemPrompt, userContent, maxTokens: 1600, timeout: 120_000, label: 'direct' });
   const parsed = JSON.parse(rawContent);
   return { parsed, rawContent };
 }
@@ -305,34 +275,28 @@ async function summarizeChunk(
   lectureType: LectureType,
   language: SummaryLanguage
 ): Promise<ChunkExtraction> {
-  const fallback: ChunkExtraction = { topics: [], keyPoints: [], details: [], keywords: [] };
-  try {
-    const systemPrompt = buildChunkExtractionPrompt(lectureType, language, chunkIndex, totalChunks);
-    const userContent = language === 'ko'
-      ? `강의 구간 ${chunkIndex + 1}/${totalChunks}:\n\n${chunk}`
-      : language === 'en'
-      ? `Lecture segment ${chunkIndex + 1}/${totalChunks}:\n\n${chunk}`
-      : `讲座片段 ${chunkIndex + 1}/${totalChunks}：\n\n${chunk}`;
+  const systemPrompt = buildChunkExtractionPrompt(lectureType, language, chunkIndex, totalChunks);
+  const userContent = language === 'ko'
+    ? `강의 구간 ${chunkIndex + 1}/${totalChunks}:\n\n${chunk}`
+    : language === 'en'
+    ? `Lecture segment ${chunkIndex + 1}/${totalChunks}:\n\n${chunk}`
+    : `讲座片段 ${chunkIndex + 1}/${totalChunks}：\n\n${chunk}`;
 
-    const raw = await callOpenAI({
-      systemPrompt,
-      userContent,
-      maxTokens: 1500,
-      timeout: 90_000,
-      label: `chunk-${chunkIndex + 1}/${totalChunks}`,
-    });
+  const raw = await callGroq({
+    systemPrompt,
+    userContent,
+    maxTokens: 650,
+    timeout: 90_000,
+    label: `chunk-${chunkIndex + 1}/${totalChunks}`,
+  });
 
-    const p = JSON.parse(raw);
-    return {
-      topics:    Array.isArray(p.topics)    ? p.topics    : [],
-      keyPoints: Array.isArray(p.keyPoints) ? p.keyPoints : [],
-      details:   Array.isArray(p.details)   ? p.details   : [],
-      keywords:  Array.isArray(p.keywords)  ? p.keywords  : [],
-    };
-  } catch (err: any) {
-    console.warn(`[summarize] chunk ${chunkIndex + 1}/${totalChunks} extraction failed: ${err.message}`);
-    return fallback;
-  }
+  const p = JSON.parse(raw);
+  return {
+    topics:    Array.isArray(p.topics)    ? p.topics    : [],
+    keyPoints: Array.isArray(p.keyPoints) ? p.keyPoints : [],
+    details:   Array.isArray(p.details)   ? p.details   : [],
+    keywords:  Array.isArray(p.keywords)  ? p.keywords  : [],
+  };
 }
 
 /**
@@ -349,36 +313,26 @@ async function summarizeChunked(
   const chunks = splitIntoChunks(text);
   console.log(`[summarize] chunked path — ${chunks.length} chunks, total ${text.length} chars`);
 
-  // ── Phase 1: Extract from each chunk in parallel (bounded) ──────────────────
-  const extractions = await pooledMap(
-    chunks,
-    MAX_CONCURRENT,
-    (chunk, i) => summarizeChunk(chunk, i, chunks.length, lectureType, language)
-  );
-
-  // Filter out empty extractions (failed chunks)
-  const successfulExtractions = extractions.filter(
-    e => e.keyPoints.length > 0 || e.topics.length > 0 || e.details.length > 0
-  );
-
-  if (successfulExtractions.length === 0) {
-    throw new Error('All chunk extractions failed — cannot produce summary.');
+  // Keep the merge input bounded as well as the individual transcript requests.
+  let extractionSummary = '';
+  for (const [index, chunk] of chunks.entries()) {
+    const extraction = await summarizeChunk(chunk, index, chunks.length, lectureType, language);
+    if (!extraction.keyPoints.length && !extraction.topics.length && !extraction.details.length) {
+      throw new Error('Empty chunk extraction');
+    }
+    extractionSummary += '\n' + JSON.stringify(extraction);
+    if (extractionSummary.length > CHUNK_SIZE_CHARS) {
+      const compact = await callGroq({
+        systemPrompt: 'Condense the cumulative lecture notes into a JSON object with a concise notes string. Preserve important facts in the original language.',
+        userContent: extractionSummary, maxTokens: 650, label: 'compact',
+      });
+      const { notes } = JSON.parse(compact);
+      if (typeof notes !== 'string' || !notes.trim()) throw new Error('Empty merged notes');
+      extractionSummary = notes;
+    }
   }
 
-  console.log(`[summarize] chunk extraction complete — ${successfulExtractions.length}/${chunks.length} successful`);
-
-  // ── Phase 2: Merge all extractions into one final summary ───────────────────
-  // Build a compact text representation of the extractions to feed to GPT.
-  const extractionSummary = successfulExtractions.map((e, i) => {
-    const lines: string[] = [`[Segment ${i + 1}]`];
-    if (e.topics.length)    lines.push(`Topics: ${e.topics.join(', ')}`);
-    if (e.keyPoints.length) lines.push(`Key Points:\n${e.keyPoints.map(p => `  - ${p}`).join('\n')}`);
-    if (e.details.length)   lines.push(`Details:\n${e.details.map(d => `  [${d.heading}] ${d.content}`).join('\n')}`);
-    if (e.keywords.length)  lines.push(`Keywords: ${e.keywords.join(', ')}`);
-    return lines.join('\n');
-  }).join('\n\n---\n\n');
-
-  const mergeSystemPrompt = buildMergePrompt(lectureType, language, successfulExtractions.length);
+  const mergeSystemPrompt = buildMergePrompt(lectureType, language, chunks.length);
   const mergeUserContent = language === 'ko'
     ? `다음은 강의 전체에서 추출된 구간별 내용입니다. 이를 종합하여 전체 강의의 JSON 요약을 작성해 주세요:\n\n${extractionSummary}`
     : language === 'en'
@@ -386,10 +340,10 @@ async function summarizeChunked(
     : `以下是完整讲座各片段的提取内容。将其综合成完整的JSON摘要：\n\n${extractionSummary}`;
 
   // Merge response needs more tokens since it synthesizes many chunks
-  const rawContent = await callOpenAI({
+  const rawContent = await callGroq({
     systemPrompt: mergeSystemPrompt,
     userContent:  mergeUserContent,
-    maxTokens:    3000,
+    maxTokens:    1600,
     timeout:      120_000,
     label:        'merge',
   });
@@ -402,10 +356,10 @@ async function summarizeChunked(
 
 /**
  * POST /api/summarize
- * Summarizes a lecture transcript using OpenAI GPT and suggests a title.
+ * Summarizes a lecture transcript using Groq GPT and suggests a title.
  * Supports lecture-type-specific structured summaries in multiple languages.
  *
- * Short transcripts (<= 20,000 chars): single direct OpenAI call (original path).
+ * Short transcripts (<= 20,000 chars): single direct Groq call (original path).
  * Long transcripts (> 20,000 chars): chunked map-reduce summarization.
  *
  * Body: { text: string, lectureType?: LectureType, language?: SummaryLanguage }
@@ -421,7 +375,7 @@ router.post('/', async (req: Request, res: Response) => {
     language?: SummaryLanguage;
   };
 
-  if (!text || text.trim().length === 0) {
+  if (typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ error: 'Request body must include a non-empty "text" field.' });
     return;
   }
@@ -500,7 +454,7 @@ router.post('/', async (req: Request, res: Response) => {
       return;
     }
     if (status === 401) {
-      res.status(401).json({ error: 'OpenAI API 키가 유효하지 않습니다.' });
+      res.status(401).json({ error: 'Groq API 키가 유효하지 않습니다.' });
       return;
     }
 

@@ -44,7 +44,7 @@
 - Node.js + Express
 - TypeScript
 - Groq (Speech-to-text)
-- OpenAI GPT-4o-mini (Summarization)
+- Groq Qwen (Summarization)
 
 ### Deployment
 - Mobile: EAS Build (Expo Application Services)
@@ -112,7 +112,6 @@ cd lecture-api
 npm install
 
 # 환경변수 설정 (.env 파일 생성)
-echo "OPENAI_API_KEY=your_openai_key" > .env
 echo "GROQ_API_KEY=your_groq_key" >> .env
 echo "APP_SECRET=your_app_secret" >> .env
 
@@ -122,12 +121,12 @@ npm run build && node --env-file=.env dist/index.js
 # Node.js 20.6 이상에서 .env를 읽어 실행합니다.
 ```
 
-앱의 **설정 → AI 서버 연결**에서 같은 `APP_SECRET`을 입력합니다. 전사에는 Groq 키가, 요약에는 OpenAI 키가 필요합니다.
+앱의 **설정 → AI 서버 연결**에서 같은 `APP_SECRET`을 입력합니다. 전사와 요약에는 같은 Groq 키를 사용합니다.
 
 ### Render 배포
 
 1. Render에서 **New → Blueprint**로 GitHub 저장소와 배포 브랜치를 연결합니다. 저장소 루트의 `render.yaml`이 `LectureRecorder/lecture-api`를 무료 Web Service로 배포합니다.
-2. Render 대시보드에서 `GROQ_API_KEY`와 `OPENAI_API_KEY`를 입력합니다. Render가 생성한 `APP_SECRET`은 내부 테스트 앱의 **설정 → AI 서버 연결**에서 입력합니다.
+2. Render 대시보드에서 `GROQ_API_KEY`를 입력합니다. Render가 생성한 `APP_SECRET`은 내부 테스트 앱의 **설정 → AI 서버 연결**에서 입력합니다.
 3. 발급된 HTTPS 주소의 `/health`가 HTTP 200을 반환하는지 확인합니다. 이어서 내부 테스트 앱에서 짧은 강의의 전사와 요약을 확인합니다.
 4. Expo 대시보드에서 배포할 EAS 환경의 `EXPO_PUBLIC_BACKEND_URL`에 발급된 주소를 설정하고 새 빌드를 만듭니다. `preview`와 `production`은 각각 설정합니다.
 
@@ -138,7 +137,6 @@ npm run build && node --env-file=.env dist/index.js
 | 변수명 | 설명 | 위치 |
 |--------|------|------|
 | `EXPO_PUBLIC_BACKEND_URL` | 백엔드 서버 URL | `.env` (앱) |
-| `OPENAI_API_KEY` | OpenAI API 키 | 백엔드 환경변수 |
 | `GROQ_API_KEY` | Groq API 키 | 백엔드 환경변수 |
 | `APP_SECRET` | 앱 인증 시크릿 | 백엔드 환경변수 |
 

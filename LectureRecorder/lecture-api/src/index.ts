@@ -12,8 +12,7 @@ const PORT = process.env.PORT || 3000;
 function validateEnv(): void {
   console.log('[startup] Validating required environment variables...');
   const checks = [
-    { key: 'GROQ_API_KEY', value: config.groqKey, desc: 'transcription (Groq)' },
-    { key: 'OPENAI_API_KEY',     value: config.openAiKey,     desc: 'summarization' },
+    { key: 'GROQ_API_KEY', value: config.groqKey, desc: 'transcription and summarization (Groq)' },
     { key: 'APP_SECRET',         value: config.appSecret, desc: 'request authentication' },
   ];
   let allOk = true;
@@ -66,13 +65,12 @@ app.use((req, res, next) => {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  const ready = Boolean(config.openAiKey && config.groqKey && config.appSecret);
+  const ready = Boolean(config.groqKey && config.appSecret);
   res.status(ready ? 200 : 503).json({
     status: ready ? 'ok' : 'not_ready',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
     services: {
-      openai:     config.openAiKey     ? 'configured' : 'MISSING',
       groq: config.groqKey ? 'configured' : 'MISSING',
       appSecret:  config.appSecret ? 'configured' : 'MISSING',
     },
